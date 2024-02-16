@@ -1,21 +1,28 @@
 use std::{
     sync::mpsc,
     sync::mpsc::channel,
-    sync::{Arc, Mutex},
+    sync::{mpsc::TryRecvError, Arc, Mutex},
     thread,
     thread::JoinHandle,
 };
 
-fn worker(rx: Arc<Mutex<mpsc::Receiver<Job>>>) {
+fn worker(id: usize, rx: Arc<Mutex<mpsc::Receiver<Job>>>) {
     loop {
-        let f = rx.lock().unwrap().recv().unwrap();
-        f();
+        let msg = rx.lock().unwrap().try_recv();
+        match msg {
+            Err(TryRecvError::Disconnected) => {
+                println!("worker thread {id} stopping, channel disconnected");
+                break;
+            }
+            Err(TryRecvError::Empty) => continue,
+            Ok(f) => f(),
+        }
     }
 }
 
 pub struct ThreadPool {
-    threads: Vec<JoinHandle<()>>,
-    tx: mpsc::Sender<Job>,
+    threads: Vec<Option<JoinHandle<()>>>,
+    tx: Option<mpsc::Sender<Job>>,
 }
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
@@ -26,11 +33,12 @@ impl ThreadPool {
         let rx = Arc::new(Mutex::new(rx));
         let mut pool = ThreadPool {
             threads: Vec::with_capacity(n),
-            tx,
+            tx: Some(tx),
         };
-        for _ in 0..n {
+        for id in 0..n {
             let rx_clone = Arc::clone(&rx);
-            pool.threads.push(thread::spawn(move || worker(rx_clone)));
+            pool.threads
+                .push(Some(thread::spawn(move || worker(id, rx_clone))));
         }
         pool
     }
@@ -40,7 +48,21 @@ impl ThreadPool {
     {
         // create Job
         let job: Job = Box::new(f);
-        let _ = self.tx.send(job);
-        println!("finished posting job");
+        let _ = self.tx.clone().unwrap().send(job);
+    }
+}
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        println!("Cleaning up ThreadPool");
+        // signal stop to threads
+        drop(self.tx.take());
+
+        // then wait for threads to finish
+        for t in self.threads.iter_mut() {
+            if let Some(thread) = t.take() {
+                let _ = thread.join();
+            }
+        }
     }
 }

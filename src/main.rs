@@ -52,8 +52,12 @@ fn main() -> std::io::Result<()> {
     println!("Listening on 127.0.0.1:8080");
 
     let mut pool = ThreadPool::new(4);
-    for stream in listener.incoming() {
+    for (i, stream) in listener.incoming().enumerate() {
         pool.execute(|| handle_request(stream.unwrap()));
+        if i == 5 {
+            break; // used to make sure drop is correct
+        }
     }
+    println!("threadpool should be out of scope");
     Ok(())
 }
